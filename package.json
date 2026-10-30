@@ -1,0 +1,10 @@
+{
+  "name": "file-based-event-sourcing",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Node.js app connecting to HDFS through WebHDFS",
+  "type": "module",
+  "dependencies": {
+    "webhdfs": "^1.2.0"
+  }
+}

@@ -1,0 +1,39 @@
+services:
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    restart: unless-stopped
+    container_name: namenode
+    hostname: namenode  # <-- Added: Force internal domain name
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+    environment:
+      CLUSTER_NAME: local-hdfs
+      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+      HDFS_CONF_dfs_webhdfs_enabled: "true"
+      HDFS_CONF_dfs_replication: "1"
+    volumes:
+      - namenode_data:/hadoop/dfs/name
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    restart: unless-stopped
+    container_name: datanode
+    hostname: datanode  # <-- Added: Force internal domain name
+    depends_on:
+      - namenode
+    ports:
+      - "9864:9864"
+    environment:
+      SERVICE_PRECONDITION: "namenode:9870"
+      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+      HDFS_CONF_dfs_webhdfs_enabled: "true"
+      HDFS_CONF_dfs_replication: "1"
+      # 👇 CRITICAL ADDITION: Forces the DataNode to broadcast its name, not a hex ID
+      HADOOP_CFG_dfs_datanode_hostname: datanode 
+    volumes:
+      - datanode_data:/hadoop/dfs/data
+
+volumes:
+  namenode_data:
+  datanode_data:
