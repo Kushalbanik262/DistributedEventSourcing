@@ -4,7 +4,14 @@
   "private": true,
   "description": "Node.js app connecting to HDFS through WebHDFS",
   "type": "module",
+  "scripts": {
+    "start": "node FileSystem/command.js",
+    "start:events": "node FileSystem/event.js",
+    "start:state": "node FileSystem/state.js"
+  },
   "dependencies": {
+    "express": "^5.3.0",
+    "pg": "^8.23.1",
     "webhdfs": "^1.2.0"
   }
 }
