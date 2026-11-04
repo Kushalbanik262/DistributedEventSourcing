@@ -69,7 +69,7 @@ export async function processEvents() {
     for (let index = processedEventCount; index < events.length; index += 1) {
       info('state', 'event.apply.started', { index, eventId: events[index].eventId });
       await postgres.applyEvent(events[index]);
-      processedEventCount = index + 1;
+      processedEventCount = index + 1; // Durability Purpose
       info('state', 'checkpoint.write.started', { path: checkpointPath, processedEventCount });
       await hdfs.writeFile(checkpointPath, String(processedEventCount));
       info('state', 'event.apply.completed', {

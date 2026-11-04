@@ -2,10 +2,12 @@
 import { randomUUID } from 'node:crypto';
 import { HdfsReaderWriter } from './hdfs-reader-writer.js';
 import { debug, error, info, warn } from './logger.js';
+import { writeToDb } from '../RocksDb/RocksDbmanager.js';
 
 const commandPath = '/system/v1/command';
 export const eventsPath = '/system/v1/events';
 const pollingInterval = 5000;
+const snapshotInterval = 1000;
 const hdfs = new HdfsReaderWriter();
 let isPolling = false;
 
@@ -18,6 +20,7 @@ export function parseCommandEvents(command) {
   const normalizedCommand = command.trim();
   const match = normalizedCommand.match(/^([A-Za-z][A-Za-z0-9_]*)-\$([1-9][0-9]*)-([A-Za-z][A-Za-z0-9_]*)$/);
   if (!match || match[1].toLowerCase() === match[3].toLowerCase()) {
+    // Same Person trabsaction detected
     warn('event', 'command.invalid', { commandLength: normalizedCommand.length });
     throw new TypeError('Malformed transfer command. Expected A-$amount-B.');
   }
@@ -62,6 +65,28 @@ export function parseCommandEvents(command) {
 }
 
 
+
+async function storeEventToSnapsot(){
+  debug(`event`, `snapshot.started`, {eventsPath});
+  let eventFileRead = false;
+  try{
+    const eventFile = await hdfs.readFile(eventsPath,{encoding : 'utf8'});
+    eventFileRead = true;
+    let events = eventFile.split(/\r?\n/)
+                         .filter((line) => line.trim().length > 0)
+                         .map((line) => JSON.parse(line));
+    // Make this events store in RocksDb as Snapshot
+    for(let event in events){
+      writeToDb(event.eventId,event); // Write this event to DataBase
+    }
+  }
+  catch(error){
+    error()
+  }
+}
+
+
+
 async function readCommand() {
   if (isPolling) return;
   isPolling = true;
@@ -84,7 +109,7 @@ async function readCommand() {
     const jsonLines = `${events.map((event) => JSON.stringify(event)).join('\n')}\n`;
     await hdfs.appendFile(eventsPath, jsonLines);
     info('event', 'events.append.completed', { path: eventsPath, eventCount: events.length });
-
+    // Just Take a spapshot of the events For a perticular time and store to RocksDB
   } catch (cause) {
     // A missing command file is normal; a malformed command is acknowledged and deleted.
     if (/not found|does not exist|file not found/i.test(cause.message)) {
@@ -109,6 +134,11 @@ export function filePoller() {
   info('event', 'poller.started', { intervalMs: pollingInterval, commandPath, eventsPath });
   void readCommand();
   return setInterval(() => void readCommand(), pollingInterval);
+}
+
+export function snapsotPicker(){
+  info('event',`snapshot.picker`,{intervalMs: snapshotInterval, eventsPath});
+  return setInterval(()=> void storeEventToSnapsot(), snapshotInterval);
 }
 
 filePoller();
