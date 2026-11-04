@@ -1,18 +1,24 @@
 // Polls the HDFS command file, expands commands into events, then removes processed commands.
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { HdfsReaderWriter } from './hdfs-reader-writer.js';
 import { debug, error, info, warn } from './logger.js';
-import { writeToDb } from '../RocksDb/RocksDbmanager.js';
+import { SnapshotScheduler } from '../RocksDb/snapshot-scheduler.js';
 
 const commandPath = '/system/v1/command';
 export const eventsPath = '/system/v1/events';
 const pollingInterval = 5000;
-const snapshotInterval = 1000;
 const hdfs = new HdfsReaderWriter();
 let isPolling = false;
+const snapshotScheduler = new SnapshotScheduler();
 
 /** Convert a transfer command such as "A-$100-b" into debit and credit events. */
-export function parseCommandEvents(command) {
+function stableUuid(seed) {
+  const hex = createHash('sha256').update(seed).digest('hex').slice(0, 32);
+  const variantNibble = (8 | (Number.parseInt(hex.slice(16, 17), 16) & 3)).toString(16);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${variantNibble}${hex.slice(17, 20)}-${hex.slice(20)}`;
+}
+
+export function parseCommandEvents(command, commandId = randomUUID()) {
   if (typeof command !== 'string' || command.trim().length === 0) {
     throw new TypeError('Command must be a non-empty string.');
   }
@@ -27,11 +33,11 @@ export function parseCommandEvents(command) {
 
   const [, sender, amountText, receiver] = match;
   const amount = Number(amountText);
-  const transferId = randomUUID();
+  const transferId = commandId;
   const occurredAt = new Date().toISOString();
   const parsedEvents = [
     {
-      eventId: randomUUID(),
+      eventId: stableUuid(`${commandId}|${sender}|-`),
       transferId,
       entity: sender,
       operation: '-',
@@ -40,7 +46,7 @@ export function parseCommandEvents(command) {
       occurredAt,
     },
     {
-      eventId: randomUUID(),
+      eventId: stableUuid(`${commandId}|${receiver}|+`),
       transferId,
       entity: receiver,
       operation: '+',
@@ -66,26 +72,6 @@ export function parseCommandEvents(command) {
 
 
 
-async function storeEventToSnapsot(){
-  debug(`event`, `snapshot.started`, {eventsPath});
-  let eventFileRead = false;
-  try{
-    const eventFile = await hdfs.readFile(eventsPath,{encoding : 'utf8'});
-    eventFileRead = true;
-    let events = eventFile.split(/\r?\n/)
-                         .filter((line) => line.trim().length > 0)
-                         .map((line) => JSON.parse(line));
-    // Make this events store in RocksDb as Snapshot
-    for(let event in events){
-      writeToDb(event.eventId,event); // Write this event to DataBase
-    }
-  }
-  catch(error){
-    error()
-  }
-}
-
-
 
 async function readCommand() {
   if (isPolling) return;
@@ -96,7 +82,15 @@ async function readCommand() {
   try {
     const commandFile = await hdfs.readFile(commandPath, { encoding: 'utf8' });
     commandFileRead = true;
-    const commands = commandFile.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const commands = commandFile.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+      try {
+        const record = JSON.parse(line);
+        if (record && typeof record.command === 'string' && typeof record.commandId === 'string') return record;
+      } catch {
+        // Legacy raw command lines are handled below.
+      }
+      return { command: line, commandId: undefined };
+    });
     info('event', 'commands.read', { path: commandPath, commandCount: commands.length, bytes: Buffer.byteLength(commandFile), command: commandFile });
 
     if (commands.length === 0) {
@@ -104,12 +98,12 @@ async function readCommand() {
       return;
     }
 
-    const events = commands.flatMap(parseCommandEvents);
+    const events = commands.flatMap(({ command, commandId }) => parseCommandEvents(command, commandId));
     info('event', 'events.append.started', { path: eventsPath, commandCount: commands.length, eventCount: events.length });
     const jsonLines = `${events.map((event) => JSON.stringify(event)).join('\n')}\n`;
     await hdfs.appendFile(eventsPath, jsonLines);
     info('event', 'events.append.completed', { path: eventsPath, eventCount: events.length });
-    // Just Take a spapshot of the events For a perticular time and store to RocksDB
+    snapshotScheduler.enqueue(events);
   } catch (cause) {
     // A missing command file is normal; a malformed command is acknowledged and deleted.
     if (/not found|does not exist|file not found/i.test(cause.message)) {
@@ -136,9 +130,12 @@ export function filePoller() {
   return setInterval(() => void readCommand(), pollingInterval);
 }
 
-export function snapsotPicker(){
-  info('event',`snapshot.picker`,{intervalMs: snapshotInterval, eventsPath});
-  return setInterval(()=> void storeEventToSnapsot(), snapshotInterval);
-}
-
 filePoller();
+snapshotScheduler.start();
+
+const shutdown = async () => {
+  await snapshotScheduler.stop();
+  process.exit(0);
+};
+process.once('SIGINT', shutdown);
+process.once('SIGTERM', shutdown);

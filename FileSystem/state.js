@@ -15,7 +15,7 @@ export function validateEvent(event) {
   const valid = Boolean(
     event &&
     typeof event.eventId === 'string' &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(event.eventId) &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[0-9a-f][0-9a-f]{3}-[0-9a-f]{12}$/i.test(event.eventId) &&
     typeof event.entity === 'string' &&
     /^[A-Za-z][A-Za-z0-9_]*$/.test(event.entity) &&
     (event.operation === '+' || event.operation === '-') &&

@@ -24,6 +24,11 @@ PostgreSQL: users(user_id, amount)
     | writes the processed-event offset to HDFS
     v
 HDFS: /system/v1/state-offset
+
+Event service snapshot scheduler
+    | flushes event-derived snapshots every SNAPSHOT_INTERVAL_MS
+    v
+RocksDB: rocks_data (userId|timestamp|eventId -> snapshot)
 ```
 
 The services are independent processes:
@@ -31,6 +36,8 @@ The services are independent processes:
 - `FileSystem/command.js` accepts commands and appends them to HDFS.
 - `FileSystem/event.js` reads pending commands and expands each transfer into events.
 - `FileSystem/state.js` replays events into PostgreSQL and maintains the current balances.
+- `RocksDb/RocksDbmanager.js` stores immutable event-derived snapshots and supports per-user range queries.
+- `RocksDb/snapshot-scheduler.js` batches snapshots and persists them on a configurable interval.
 
 ## Transfer format
 
@@ -98,6 +105,39 @@ The command service returns `201` after the command has been appended to HDFS. W
 - After the current event file has been read, it is deleted and the checkpoint is reset to `0`; the next event batch starts a fresh file.
 - Missing command/event files are normal while the system is idle.
 
+## RocksDB snapshots
+
+The event service queues each event after its HDFS append succeeds. The snapshot scheduler flushes
+the queue periodically to RocksDB in one transaction. The default interval is one second and can be
+changed with `SNAPSHOT_INTERVAL_MS`.
+
+Snapshots use this composite key:
+
+```text
+<userId>|<eventId>
+```
+
+This keeps snapshots immutable, permits multiple snapshots for one user, and makes retries
+idempotent because the event ID is part of the key. The database path defaults to `./rocks_data`
+and can be changed with `ROCKSDB_PATH`.
+
+Commands are assigned a stable `commandId` before being written to HDFS. If the event service
+retries a command after an append/delete failure, it regenerates the same event IDs instead of
+creating another transfer. Duplicate-looking records already present from earlier retries are
+historical data and are not automatically deleted.
+
+The manager exports `writeToDb` for one event, `writeSnapshots` for a batch, plus `readFromDb`,
+`readSnapshotsForUser`, and `readLatestSnapshot` for application code.
+
+Read snapshots over HTTP with:
+
+```bash
+curl "http://localhost:3000/snapshots/A?limit=100&from=2026-01-01T00:00:00Z"
+```
+
+The endpoint is `GET /snapshots/:userId`. Optional `from` and `to` values accept ISO timestamps
+or epoch milliseconds. `limit` defaults to `100` and is capped at `1000`.
+
 ## Configuration
 
 The services use these environment variables when provided:
@@ -114,6 +154,8 @@ The services use these environment variables when provided:
 | `PGUSER` | `event_user` | state service |
 | `PGPASSWORD` | `event_password` | state service |
 | `STATE_POLL_INTERVAL_MS` | `5000` | state service |
+| `SNAPSHOT_INTERVAL_MS` | `1000` | event service snapshot scheduler |
+| `ROCKSDB_PATH` | `./rocks_data` | event service snapshot store |
 | `LOG_LEVEL` | `INFO` | all services |
 
 Set `LOG_LEVEL=DEBUG` to see polling, HDFS, checkpoint, and database transaction details.
@@ -121,6 +163,10 @@ Set `LOG_LEVEL=DEBUG` to see polling, HDFS, checkpoint, and database transaction
 ## Project layout
 
 ```text
+RocksDb/
+├── RocksDbmanager.js         # RocksDB snapshot repository
+└── snapshot-scheduler.js     # periodic snapshot batcher
+
 FileSystem/
 ├── command.js                # HTTP command intake
 ├── event.js                  # command-to-event processor
